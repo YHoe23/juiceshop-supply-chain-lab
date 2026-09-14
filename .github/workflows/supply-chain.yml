@@ -54,4 +54,105 @@ jobs:
         with:
           sarif_file: results.sarif
           category: "grype-sbom"
-          
+      # 7. Also export Grype results as JSON for PDF generation
+      - name: Scan SBOM with Grype (JSON)
+        run: grype sbom:juiceshop.sbom.json -o json > grype-results.json
+        continue-on-error: true
+
+      # 8. Set up Python and generate PDF Report (High & Critical only)
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ReportLab
+        run: pip install reportlab
+
+      - name: Generate PDF Report Script
+        run: |
+          python - << 'EOF'
+          import json
+          from reportlab.lib.pagesizes import letter
+          from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+          from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+          from reportlab.lib import colors
+
+          try:
+              with open('grype-results.json') as f:
+                  data = json.load(f)
+          except Exception:
+              data = {"matches": []}
+
+          # Filter matches to only include High and Critical severities
+          filtered_matches = []
+          for match in data.get("matches", []):
+              vuln = match.get("vulnerability", {})
+              severity = vuln.get("severity", "").lower()
+              if severity in ["critical", "high"]:
+                  filtered_matches.append(match)
+
+          doc = SimpleDocTemplate("grype-vulnerability-report.pdf", pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+          styles = getSampleStyleSheet()
+          story = []
+
+          # Header Title
+          title_style = ParagraphStyle(
+              'TitleStyle',
+              parent=styles['Heading1'],
+              fontSize=18,
+              spaceAfter=5,
+              textColor=colors.HexColor('#1f2937')
+          )
+          story.append(Paragraph("Grype Vulnerability Report (Critical & High)", title_style))
+          story.append(Paragraph("Target: <code>juiceshop.sbom.json</code> | Filtered Total: " + str(len(filtered_matches)), styles['Normal']))
+          story.append(Spacer(1, 15))
+
+          # Table Setup
+          table_data = [["Vulnerability", "Severity", "Package", "Installed", "Fixed In"]]
+              
+          for match in filtered_matches:
+              vuln = match.get("vulnerability", {})
+              id_str = vuln.get("id", "Unknown")
+              severity = vuln.get("severity", "Unknown")
+                  
+              artifact = match.get("artifact", {})
+              pkg_name = artifact.get("name", "Unknown")
+              pkg_version = artifact.get("version", "Unknown")
+                  
+              fix = vuln.get("fix", {})
+              versions = fix.get("versions", [])
+              fixed_in = ", ".join(versions) if versions else "None"
+                  
+              table_data.append([
+                  Paragraph(id_str, styles['Normal']),
+                  Paragraph(severity, styles['Normal']),
+                  Paragraph(pkg_name, styles['Normal']),
+                  Paragraph(pkg_version, styles['Normal']),
+                  Paragraph(fixed_in, styles['Normal'])
+              ])
+
+          if len(table_data) > 1:
+              t = Table(table_data, colWidths=[90, 70, 130, 85, 130])
+              t.setStyle(TableStyle([
+                  ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#e5e7eb')),
+                  ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor('#111827')),
+                  ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+                  ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                  ('BOTTOMPADDING', (0,0), (-1,0), 6),
+                  ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#d1d5db')),
+                  ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#f9fafb')])
+              ]))
+              story.append(t)
+          else:
+              story.append(Paragraph("No Critical or High vulnerabilities found.", styles['Normal']))
+
+          doc.build(story)
+          print("Filtered PDF generated successfully.")
+          EOF
+
+      # 9. Upload PDF Report Artifact
+      - name: Upload PDF Report Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grype-vulnerability-report
+          path: grype-vulnerability-report.pdf
